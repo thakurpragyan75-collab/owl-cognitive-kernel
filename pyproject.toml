@@ -1,6 +1,6 @@
 [project]
 name = "owl-cognitive-kernel"
-version = "0.2.0"
+version = "0.3.0"
 description = "Intent compiler and execution kernel for OWL. Natural language → IR → DAG → sandboxed agents → verify."
 readme = "README.md"
 requires-python = ">=3.10"

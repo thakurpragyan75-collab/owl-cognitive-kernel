@@ -72,16 +72,41 @@ class Sandbox:
         finally:
             Path(name).unlink(missing_ok=True)
 
-    def run_pytest(self, *, timeout: int = 30) -> tuple[bool, str]:
+    def run_pytest(self, *, timeout: int = 30, cancel=None) -> tuple[bool, str]:
         if "EXECUTE" not in self.allow:
             raise SandboxError("EXECUTE not granted")
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["python3", "-m", "pytest", "-q"],
             cwd=str(self.root),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=timeout,
             env={**os.environ, "PYTHONPATH": str(self.root)},
         )
-        out = (proc.stdout + proc.stderr)[:8000]
-        return proc.returncode == 0, out
+        try:
+            deadline = timeout
+            waited = 0.0
+            while True:
+                if cancel is not None and getattr(cancel, "cancelled", lambda: False)():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    from ..cancel import Cancelled
+
+                    raise Cancelled("pytest cancelled")
+                try:
+                    proc.wait(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    waited += 0.2
+                    if waited >= deadline:
+                        proc.kill()
+                        raise subprocess.TimeoutExpired("pytest", timeout)
+            out = (proc.stdout.read() if proc.stdout else "")[:8000]
+            return proc.returncode == 0, out
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+

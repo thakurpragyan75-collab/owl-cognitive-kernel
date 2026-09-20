@@ -38,10 +38,13 @@ class AgentLoop:
         self.observations: list[dict[str, Any]] = []
         self.ctx = Context()
         self.rejected: list[str] = []
+        self.cancel = None
 
     def run(self, goal: str) -> dict[str, Any]:
         role = ROLES.get(self.role) or ROLES["debugger"]
         for i in range(self.max_iters):
+            if self.cancel is not None and self.cancel.cancelled():
+                return {"ok": False, "cancelled": True, "error": "cancelled", "iterations": i, "observations": self.observations}
             prompt = self._prompt(goal, role.name)
             raw = self.provider.complete(prompt, max_tokens=512)
             self.recorder.record(self.trace_id, "model.complete", {"i": i, "provider": self.provider.info.id, "bytes": len(raw)})
@@ -72,6 +75,8 @@ class AgentLoop:
             if not role_allows(role.name, typ, perm):
                 self.observations.append({"tool": typ, "error": "role_denied", "role": role.name})
                 continue
+            if self.cancel is not None and self.cancel.cancelled():
+                return {"ok": False, "cancelled": True, "error": "cancelled", "iterations": i, "observations": self.observations}
             try:
                 result = spec.run(**args)
             except (ToolError, Exception) as e:

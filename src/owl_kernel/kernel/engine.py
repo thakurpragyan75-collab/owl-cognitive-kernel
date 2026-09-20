@@ -10,6 +10,7 @@ from typing import Any, Callable
 from ..events.bus import EventBus
 from ..ir.schema import Intent
 from ..replay.recorder import Recorder
+from ..cancel import Cancelled
 from .states import TaskState
 from .task import Task
 
@@ -42,6 +43,7 @@ class Kernel:
         self._con.row_factory = sqlite3.Row
         self._cancelled: set[str] = set()
         self._approvals: set[str] = set()
+        self.cancel_token = None
         self._init()
 
     def _init(self) -> None:
@@ -237,8 +239,11 @@ class Kernel:
         return ran
 
     def _run_one(self, t: Task, handler: Callable[[Task], dict[str, Any]]) -> Task:
-        if t.id in self._cancelled:
-            t.transit(TaskState.CANCELLED)
+        if t.id in self._cancelled or (self.cancel_token is not None and self.cancel_token.cancelled()):
+            try:
+                t.transit(TaskState.CANCELLED)
+            except Exception:
+                t.state = TaskState.CANCELLED
             self._save(t)
             return t
         t.transit(TaskState.RUNNING)
@@ -248,12 +253,21 @@ class Kernel:
         try:
             out = handler(t) or {}
             err = None
+        except Cancelled as e:
+            self._cancelled.add(t.id)
+            try:
+                t.transit(TaskState.CANCELLED)
+            except Exception:
+                t.state = TaskState.CANCELLED
+            t.outputs["error"] = str(e) or "cancelled"
+            self._save(t)
+            return t
         except Exception as e:
             out, err = None, str(e)
         return self._finish(t, out, err)
 
     def _finish(self, t: Task, out: dict | None, err: str | None) -> Task:
-        if t.id in self._cancelled:
+        if t.id in self._cancelled or (self.cancel_token is not None and self.cancel_token.cancelled()) or err == "cancelled" or (out and out.get("cancelled")):
             try:
                 t.transit(TaskState.CANCELLED)
             except Exception:
@@ -293,6 +307,16 @@ class Kernel:
         seen: list[Task] = []
         idle = 0
         for _ in range(limit):
+            if self.cancel_token is not None and self.cancel_token.cancelled():
+                for t in self.all_tasks():
+                    if t.state not in {TaskState.COMPLETED, TaskState.CANCELLED, TaskState.FAILED}:
+                        self._cancelled.add(t.id)
+                        try:
+                            t.transit(TaskState.CANCELLED)
+                        except Exception:
+                            t.state = TaskState.CANCELLED
+                        self._save(t)
+                break
             if self._cancelled and all(t.state in {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.FAILED} for t in self.all_tasks()):
                 break
             batch = self.run_ready(handler)

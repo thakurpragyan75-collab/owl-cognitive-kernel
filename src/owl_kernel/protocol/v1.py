@@ -1,8 +1,9 @@
 """Stable OWL ↔ kernel protocol. Versioned so OWL HUD can stay unchanged."""
 
 PROTOCOL_VERSION = "kernel.v1"
+SERVICE_NAME = "owl-kernel"
+SERVICE_VERSION = "0.3.0"
 
-# OWL adapter should only call these operations:
 OPS = (
     "compile_intent",
     "start_task",
@@ -14,4 +15,7 @@ OPS = (
     "inspect_trace",
     "retrieve_result",
     "health",
+    "reject_action",
+    "prepare_promotion",
+    "context",
 )
