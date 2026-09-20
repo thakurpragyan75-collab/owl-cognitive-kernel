@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
+
+
+KINDS = frozenset({"fact", "observation", "assumption", "failed_hypothesis", "strategy"})
+LAYERS = frozenset({"working", "task", "project", "long_term", "history"})
 
 
 class Memory:
@@ -25,9 +28,9 @@ class Memory:
         self.con.commit()
 
     def add(self, layer: str, kind: str, body: str, source: str) -> None:
-        if kind not in {"fact", "observation", "assumption"}:
+        if kind not in KINDS:
             raise ValueError(kind)
-        if layer not in {"working", "task", "project", "long_term", "history"}:
+        if layer not in LAYERS:
             raise ValueError(layer)
         self.con.execute(
             "INSERT INTO mem(layer, kind, body, source) VALUES (?,?,?,?)",
@@ -37,4 +40,11 @@ class Memory:
 
     def facts(self, layer: str = "project") -> list[str]:
         cur = self.con.execute("SELECT body FROM mem WHERE layer=? AND kind='fact'", (layer,))
+        return [r[0] for r in cur.fetchall()]
+
+    def recent(self, layer: str, kind: str, limit: int = 12) -> list[str]:
+        cur = self.con.execute(
+            "SELECT body FROM mem WHERE layer=? AND kind=? ORDER BY id DESC LIMIT ?",
+            (layer, kind, limit),
+        )
         return [r[0] for r in cur.fetchall()]

@@ -7,10 +7,6 @@ from .openai_compat import OpenAICompatProvider
 from .stub import StubProvider
 
 
-# Official IDs verified 2026-09:
-# Qwen/Qwen3-Coder-30B-A3B-Instruct  Apache-2.0  ~61GB bf16 / ~20GB 4-bit
-# mistralai/Devstral-Small-2507      Apache-2.0  ~94GB bf16  (Mac 32GB class, not 8GB)
-
 QWEN = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 DEVSTRAL = "mistralai/Devstral-Small-2507"
 
@@ -62,11 +58,7 @@ class ModelRouter:
         self._loaded: str | None = None
 
     def health_all(self) -> list[dict]:
-        out = []
-        for p in self.providers:
-            h = p.health()
-            out.append(h)
-        return out
+        return [p.health() for p in self.providers]
 
     def available(self) -> list[ModelInfo]:
         infos = []
@@ -76,10 +68,14 @@ class ModelRouter:
         return infos
 
     def choose(self, need: str) -> Provider:
-        """need: fast_response | coding | reasoning | long_context"""
+        """need: fast_response | coding | reasoning | long_context | tool_calling
+
+        Cloud is never preferred for reasoning unless it is the only configured
+        capable provider. Giants must be healthy. Stub is always last-resort.
+        """
         ranking = {
             "coding": ["qwen3-coder", "devstral-small-2507", "cloud", "stub"],
-            "reasoning": ["cloud", "qwen3-coder", "devstral-small-2507", "stub"],
+            "reasoning": ["qwen3-coder", "devstral-small-2507", "stub", "cloud"],
             "long_context": ["qwen3-coder", "devstral-small-2507", "cloud", "stub"],
             "fast_response": ["stub", "cloud"],
             "tool_calling": ["qwen3-coder", "devstral-small-2507", "cloud", "stub"],
@@ -93,7 +89,6 @@ class ModelRouter:
             h = p.health()
             if h.get("available"):
                 if p.info.id != "stub" and self._loaded and self._loaded != p.info.id:
-                    # refuse to load a second giant model
                     continue
                 if p.info.id != "stub":
                     self._loaded = p.info.id

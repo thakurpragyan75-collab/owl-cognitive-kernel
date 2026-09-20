@@ -9,6 +9,7 @@ class TaskState(str, Enum):
     READY = "READY"
     RUNNING = "RUNNING"
     WAITING = "WAITING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
     RETRYING = "RETRYING"
@@ -24,6 +25,7 @@ LEGAL: dict[TaskState, frozenset[TaskState]] = {
     TaskState.RUNNING: frozenset(
         {
             TaskState.WAITING,
+            TaskState.WAITING_FOR_APPROVAL,
             TaskState.BLOCKED,
             TaskState.FAILED,
             TaskState.VERIFYING,
@@ -32,9 +34,10 @@ LEGAL: dict[TaskState, frozenset[TaskState]] = {
         }
     ),
     TaskState.WAITING: frozenset({TaskState.READY, TaskState.CANCELLED, TaskState.FAILED}),
+    TaskState.WAITING_FOR_APPROVAL: frozenset({TaskState.RUNNING, TaskState.READY, TaskState.CANCELLED, TaskState.FAILED}),
     TaskState.BLOCKED: frozenset({TaskState.READY, TaskState.CANCELLED, TaskState.FAILED}),
     TaskState.FAILED: frozenset({TaskState.RETRYING, TaskState.CANCELLED}),
-    TaskState.RETRYING: frozenset({TaskState.RUNNING, TaskState.FAILED, TaskState.CANCELLED}),
+    TaskState.RETRYING: frozenset({TaskState.READY, TaskState.RUNNING, TaskState.FAILED, TaskState.CANCELLED}),
     TaskState.VERIFYING: frozenset({TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED}),
     TaskState.COMPLETED: frozenset(),
     TaskState.CANCELLED: frozenset(),

@@ -1,1 +1,4 @@
-# Tool surface lives in sandbox.exec (permissioned). Extra tools plug in via PluginRegistry.
+from .builtin import build_tools
+from .spec import ToolError, ToolSpec
+
+__all__ = ["build_tools", "ToolSpec", "ToolError"]

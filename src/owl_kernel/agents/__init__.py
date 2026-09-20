@@ -1,9 +1,3 @@
-ROLES = {
-    "architect": {"READ"},
-    "researcher": {"READ"},
-    "coder": {"READ", "WRITE"},
-    "debugger": {"READ", "WRITE", "EXECUTE"},
-    "tester": {"READ", "EXECUTE"},
-    "security": {"READ"},
-    "docs": {"READ"},
-}
+from .roles import ROLES, Role, role_allows
+
+__all__ = ["ROLES", "Role", "role_allows"]

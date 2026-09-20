@@ -11,7 +11,7 @@ from .runtime import Runtime
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="owl-kernel")
     p.add_argument("source", nargs="?", default="Find the bug, fix it, test, apply only if tests pass.")
-    p.add_argument("--repo", default="examples/fixture_repo")
+    p.add_argument("--repo", default="examples/shop_repo")
     args = p.parse_args(argv)
     repo = Path(args.repo)
     if not repo.is_absolute():

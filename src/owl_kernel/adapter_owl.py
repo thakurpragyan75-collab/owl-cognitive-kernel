@@ -1,6 +1,7 @@
 """Thin OWL adapter. HUD stays in OWL. Kernel speaks protocol v1 JSON.
 
-OWL should call these functions (or HTTP later) — never import kernel internals.
+OWL should call HTTP kernel.v1 on 127.0.0.1:8770 — never import kernel internals.
+These helpers exist for in-process tests.
 """
 
 from __future__ import annotations
