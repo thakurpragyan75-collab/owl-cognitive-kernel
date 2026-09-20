@@ -215,6 +215,16 @@ class Kernel:
         return [x for x in ran if x]
 
     def _run_parallel(self, tasks: list[Task], handler: Callable[[Task], dict[str, Any]]) -> list[Task]:
+        if self.cancel_token is not None and self.cancel_token.cancelled():
+            ran = []
+            for t in tasks:
+                try:
+                    t.transit(TaskState.CANCELLED)
+                except Exception:
+                    t.state = TaskState.CANCELLED
+                self._save(t)
+                ran.append(t)
+            return ran
         # handlers run concurrently; sqlite writes stay on this thread after join
         for t in tasks:
             t.transit(TaskState.RUNNING)
@@ -222,8 +232,12 @@ class Kernel:
         results: dict[str, tuple[Task, dict | None, str | None]] = {}
 
         def call(t: Task) -> tuple[str, dict | None, str | None]:
+            if self.cancel_token is not None and self.cancel_token.cancelled():
+                return t.id, {"cancelled": True}, "cancelled"
             try:
                 return t.id, handler(t) or {}, None
+            except Cancelled as e:
+                return t.id, {"cancelled": True}, str(e) or "cancelled"
             except Exception as e:
                 return t.id, None, str(e)
 

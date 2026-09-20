@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -25,6 +27,9 @@ from .sandbox.exec import Sandbox
 from .security.auditor import audit_text, document_is_untrusted
 from .tools.builtin import build_tools
 
+SUCCESS_STATES = {"VERIFIED", "WAITING_FOR_APPROVAL", "READY_FOR_PROMOTION"}
+LOCKED_STATES = {"CANCELLED", "DISCARDED", "PROMOTION_REJECTED"}
+
 
 class Runtime:
     def __init__(
@@ -35,6 +40,9 @@ class Runtime:
         router: ModelRouter | None = None,
         wait_for_approval: bool = False,
         allowed_roots: list[Path] | None = None,
+        max_retries: int = 3,
+        max_iterations: int = 24,
+        timeout_seconds: int = 300,
     ):
         self.work = Path(work)
         self.work.mkdir(parents=True, exist_ok=True)
@@ -43,12 +51,14 @@ class Runtime:
         else:
             self.target = resolve_repository(repo, allowed_roots=allowed_roots)
         self.repo = self.target.path
-        self.kernel = Kernel(self.work / "kernel.db")
+        self.max_heal = max(1, int(max_retries))
+        self.max_iterations = max(1, int(max_iterations))
+        self.timeout_seconds = max(1, int(timeout_seconds))
+        self.kernel = Kernel(self.work / "kernel.db", max_retries=self.max_heal)
         self.router = router or ModelRouter()
         self.isolated = self.work / "isolated"
         self.memory = Memory(self.work / "memory.db")
         self.metrics = Metrics()
-        self.max_heal = 3
         self.candidate: Candidate | None = None
         self._agent_ran = False
         self.wait_for_approval = wait_for_approval
@@ -56,9 +66,13 @@ class Runtime:
         self.kernel.cancel_token = self.cancel_token
         self.events: list[dict] = []
         self._cv = threading.Condition()
+        self._state_lock = threading.Lock()
         self.state = "CREATED"
         self.task_id = ""
         self.findings: list[dict] = []
+        self.ctx: dict = {}
+        self.attempt = 0
+        self.deadline = 0.0
 
     def emit(self, typ: str, data: dict | None = None) -> None:
         ev = {"type": typ, "timestamp": datetime.now(timezone.utc).isoformat(), "data": data or {}}
@@ -67,10 +81,21 @@ class Runtime:
             self._cv.notify_all()
         self.kernel.recorder.record(self.task_id or "runtime", typ, data or {})
 
+    def _set_state(self, new: str) -> str:
+        with self._state_lock:
+            if self.state in LOCKED_STATES:
+                return self.state
+            if self.cancel_token.cancelled() and new in SUCCESS_STATES | {"RUNNING", "VERIFYING", "CREATED"}:
+                self.state = "CANCELLED"
+                return self.state
+            self.state = new
+            return self.state
+
     def execute(self, source: str) -> dict:
         self.task_id = self.task_id or str(uuid4())
+        self.deadline = time.monotonic() + self.timeout_seconds
         if document_is_untrusted(source):
-            self.state = "FAILED"
+            self._set_state("FAILED")
             return self._result(ok=False, error="prompt injection in source")
         if self.cancel_token.cancelled():
             return self._cancelled_result()
@@ -90,12 +115,16 @@ class Runtime:
             "provider": provider.info.id,
             "host": host,
         }
-        self.state = "RUNNING"
+        self.ctx = ctx
+        if self._set_state("RUNNING") != "RUNNING":
+            return self._cancelled_result()
         if self.candidate:
             self.candidate.state = CandidateState.RUNNING
 
         def handler(t: Task) -> dict:
             self.cancel_token.raise_if_cancelled()
+            if time.monotonic() > self.deadline:
+                raise Cancelled("timeout")
             return self._handle(t, ctx, provider)
 
         try:
@@ -104,6 +133,8 @@ class Runtime:
             return self._cancelled_result()
         if self.cancel_token.cancelled():
             return self._cancelled_result()
+        self.ctx = ctx
+        self.attempt = int(ctx.get("heal_used") or 0)
         tasks = self.kernel.all_tasks()
         report = next((t for t in tasks if t.kind == "report"), None)
         ok = bool(report and report.state.value == "COMPLETED" and ctx.get("verify_ok"))
@@ -111,33 +142,36 @@ class Runtime:
             if self.candidate:
                 self.candidate.state = CandidateState.FAILED
                 self.candidate.discard()
-            self.state = "FAILED"
-            self.emit("task.completed", {"state": "FAILED"})
-            return self._result(ok=False, ctx=ctx, extra={"intent": intent.to_dict()})
+            self._set_state("FAILED")
+            self.emit("task.completed", {"state": self.state})
+            return self._result(ok=False, extra={"intent": intent.to_dict()})
         if self.candidate:
             self.candidate.accept_isolated()
             self.candidate.state = CandidateState.VERIFIED
         if self.wait_for_approval:
             if self.candidate:
                 self.candidate.state = CandidateState.WAITING_FOR_APPROVAL
-            self.state = "WAITING_FOR_APPROVAL"
+            if self._set_state("WAITING_FOR_APPROVAL") != "WAITING_FOR_APPROVAL":
+                return self._cancelled_result()
             self.emit("approval.required", {"task_id": self.task_id})
             self.emit("task.completed", {"state": "WAITING_FOR_APPROVAL"})
         else:
-            self.state = "VERIFIED"
+            if self._set_state("VERIFIED") != "VERIFIED":
+                return self._cancelled_result()
             self.emit("task.completed", {"state": "VERIFIED"})
-        return self._result(ok=True, ctx=ctx, extra={"intent": intent.to_dict()})
+        return self._result(ok=True, extra={"intent": intent.to_dict()})
 
     def request_cancel(self, reason: str = "user") -> None:
         self.cancel_token.cancel(reason)
         self.emit("task.cancel_requested", {"reason": reason})
-        if self.state in {"WAITING_FOR_APPROVAL", "VERIFIED", "READY_FOR_PROMOTION"}:
-            if self.candidate and not self.candidate.discarded:
-                self.candidate.discard()
-            self.state = "CANCELLED"
-            self.emit("task.completed", {"state": "CANCELLED"})
-        else:
-            self.state = "CANCEL_REQUESTED"
+        with self._state_lock:
+            if self.state in {"WAITING_FOR_APPROVAL", "VERIFIED", "READY_FOR_PROMOTION"}:
+                if self.candidate and not self.candidate.discarded:
+                    self.candidate.discard()
+                self.state = "CANCELLED"
+                self.emit("task.completed", {"state": "CANCELLED"})
+            elif self.state not in LOCKED_STATES:
+                self.state = "CANCEL_REQUESTED"
 
     def approve(self, actor: str = "human") -> dict:
         if actor != "human":
@@ -146,20 +180,15 @@ class Runtime:
             return {"ok": False, "error": {"code": "NOT_WAITING", "message": f"state is {self.state}"}}
         if self.cancel_token.cancelled():
             return {"ok": False, "error": {"code": "CANCELLED", "message": "task was cancelled"}}
-        prep = self.prepare_promotion()
-        if not prep.get("ok"):
-            return prep
         if self.candidate:
             self.candidate.approved_by = actor
-            self.candidate.state = CandidateState.READY_FOR_PROMOTION
-        self.state = "READY_FOR_PROMOTION"
-        self.emit("approval.granted", {"actor": actor})
-        return {"ok": True, "task_id": self.task_id, "state": "READY_FOR_PROMOTION"}
+        return self.prepare_promotion()
 
     def reject(self, reason: str = "") -> dict:
         if self.candidate:
             self.candidate.discard()
-        self.state = "DISCARDED"
+        self._set_state("DISCARDED")
+        self.emit("candidate.rejected", {"reason": reason})
         self.emit("candidate.discarded", {"reason": reason})
         return {"ok": True, "task_id": self.task_id, "state": "DISCARDED"}
 
@@ -176,25 +205,73 @@ class Runtime:
             return {"ok": False, "error": {"code": "NOT_VERIFIED", "message": self.candidate.state.value}}
         if not self.candidate.origin_matches_baseline():
             self.candidate.state = CandidateState.PROMOTION_REJECTED
-            self.state = "PROMOTION_REJECTED"
+            self._set_state("PROMOTION_REJECTED")
             return {
                 "ok": False,
                 "error": {"code": "STALE_ORIGIN", "message": "origin changed after baseline; refusing to overwrite"},
                 "state": "PROMOTION_REJECTED",
             }
-        return {"ok": True, "state": "READY_FOR_PROMOTION"}
+        if self.candidate.approved_by != "human":
+            return {"ok": False, "error": {"code": "NO_APPROVAL", "message": "human approval required"}}
+        sb = Sandbox(self.isolated, allow={"READ", "WRITE", "EXECUTE"})
+        try:
+            ok, out = sb.run_pytest(cancel=self.cancel_token)
+        except Cancelled:
+            return {"ok": False, "error": {"code": "CANCELLED", "message": "cancelled"}, "state": "CANCELLED"}
+        self.ctx["tests"] = out
+        self.ctx["tests_ok"] = ok
+        if not ok:
+            return {"ok": False, "error": {"code": "TESTS_FAILED", "message": "candidate tests no longer pass"}, "state": self.state}
+        findings = []
+        for p in self.isolated.rglob("*.py"):
+            findings.extend(audit_text(p.read_text(encoding="utf-8"), source=str(p)))
+        self.findings = [f.__dict__ for f in findings]
+        blocking = [f for f in findings if f.rule in {"secret_exposure", "unsafe_exec"}]
+        if blocking:
+            return {"ok": False, "error": {"code": "SECURITY_FAILED", "message": "security checks failed"}}
+        self.ctx["diff"] = self.candidate.diff()
+        self.candidate.state = CandidateState.READY_FOR_PROMOTION
+        self._set_state("READY_FOR_PROMOTION")
+        self.emit("approval.granted", {"actor": self.candidate.approved_by})
+        return {"ok": True, "task_id": self.task_id, "state": "READY_FOR_PROMOTION"}
 
     def _cancelled_result(self) -> dict:
         if self.candidate and self.candidate.workspace.exists() and not self.candidate.discarded:
             self.candidate.state = CandidateState.CANCELLED
             self.candidate.discard()
-        self.state = "CANCELLED"
+        self._set_state("CANCELLED")
         self.emit("task.completed", {"state": "CANCELLED"})
         return self._result(ok=False, error="cancelled")
 
+    def _tests_obj(self) -> dict:
+        raw = str(self.ctx.get("tests") or "")
+        passed = bool(self.ctx.get("tests_ok"))
+        m = re.search(r"\d+ passed", raw)
+        summary = m.group(0) if m else (raw.strip()[-240:] if raw.strip() else "")
+        return {"passed": passed, "summary": summary}
+
+    def http_result(self) -> dict:
+        ok = self.state in SUCCESS_STATES
+        body = self._result(ok=ok)
+        task = {
+            "id": self.task_id,
+            "state": self.state,
+            "repository": str(self.repo),
+            "provider": self.metrics.provider or "mock-coder",
+            "changed_files": body.get("changed") or [],
+            "tests": self._tests_obj(),
+            "security": body.get("security") or {"passed": False, "findings": []},
+            "candidate": body.get("candidate"),
+            "diff": body.get("diff") or "",
+        }
+        body["task"] = task
+        body["changed_files"] = task["changed_files"]
+        return body
+
     def _result(self, ok: bool, error: str | None = None, ctx: dict | None = None, extra: dict | None = None) -> dict:
-        ctx = ctx or {}
+        ctx = ctx or self.ctx or {}
         cand = self.candidate
+        origin_modified = bool(cand and not cand.origin_matches_baseline()) if cand else False
         body = {
             "ok": ok,
             "state": self.state,
@@ -212,12 +289,17 @@ class Runtime:
             "changed": cand.changed_files() if cand and not cand.discarded else [],
             "candidate": {
                 "state": cand.state.value if cand else "NONE",
-                "original_modified": False,
+                "original_modified": origin_modified,
                 "workspace": str(self.isolated) if cand and not cand.discarded else None,
                 "baseline_hash": cand.origin_hash if cand else "",
             },
-            "security": {"passed": ok and not error, "findings": self.findings},
+            "security": {
+                "passed": bool(ok and not error and not any(f.get("rule") in {"secret_exposure", "unsafe_exec"} for f in self.findings)),
+                "findings": self.findings,
+            },
         }
+        if cand and not cand.discarded and not body["diff"]:
+            body["diff"] = cand.diff()
         if error:
             body["error"] = error
         if extra:
@@ -240,6 +322,7 @@ class Runtime:
 
     def _handle(self, t: Task, ctx: dict, provider) -> dict:
         self.cancel_token.raise_if_cancelled()
+        self.ctx = ctx
         kind = t.kind
         root = self.isolated
         if kind == "inspect_repo":
@@ -249,9 +332,11 @@ class Runtime:
             return {"files": list(g.files)[:40], "symbols": len(g.symbols)}
         if kind == "search_code":
             g = ctx.get("graph") or index_repo(root)
+            self.emit("tool.called", {"tool": "search_code"})
             return {"files": list(g.files)[:40], "symbols": [s.__dict__ for s in g.symbols[:30]]}
         if kind == "analyze_deps":
             g = ctx.get("graph") or index_repo(root)
+            self.emit("tool.called", {"tool": "analyze_deps"})
             return {"imports": g.imports, "tests": g.tests}
         if kind in {"propose_patch", "apply_patch", "self_heal"}:
             return self._agent(ctx, provider, t.goal)
@@ -275,7 +360,7 @@ class Runtime:
         if kind == "verify":
             if self.candidate:
                 self.candidate.state = CandidateState.VERIFYING
-            self.state = "VERIFYING"
+            self._set_state("VERIFYING")
             findings = []
             for p in root.rglob("*.py"):
                 findings.extend(audit_text(p.read_text(encoding="utf-8"), source=str(p)))
@@ -298,6 +383,7 @@ class Runtime:
         if ctx.get("heal_used", 0) >= self.max_heal and self._agent_ran:
             return {"failed": True, "error": "heal iteration limit"}
         ctx["heal_used"] = ctx.get("heal_used", 0) + 1
+        self.attempt = ctx["heal_used"]
         self._agent_ran = True
         sb = Sandbox(self.isolated, allow={"READ", "WRITE", "EXECUTE"})
         tools = build_tools(self.isolated, sb)
@@ -308,6 +394,7 @@ class Runtime:
             trace_id=ctx["trace"],
             role="debugger",
             memory=self.memory,
+            max_iters=self.max_iterations,
         )
         loop.cancel = self.cancel_token
         self.emit("agent.iteration", {"iteration": ctx["heal_used"], "provider": provider.info.id})

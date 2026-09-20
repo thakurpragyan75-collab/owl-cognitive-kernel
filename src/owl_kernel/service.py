@@ -36,15 +36,13 @@ class TaskRecord:
         rt = self.runtime
         cand = rt.candidate
         return {
-            "ok": True,
             "id": rt.task_id,
             "state": rt.state,
             "repository": str(rt.repo),
             "agent": "debugger",
-            "model": rt.metrics.provider,
-            "attempt": (cand and 1) or 1,
+            "model": rt.metrics.provider or "mock-coder",
+            "attempt": rt.attempt,
             "candidate_state": cand.state.value if cand else "NONE",
-            "request_id": self.request_id,
         }
 
 
@@ -156,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
                     {"ok": True, "task_id": tid, "events": list(rec.runtime.events), "replay": list(rec.runtime.kernel.recorder.dry_run(tid))},
                 )
             if action == "result":
-                return _json(self, 200, {"ok": True, **rec.runtime._result(ok=rec.runtime.state in {"VERIFIED", "WAITING_FOR_APPROVAL", "READY_FOR_PROMOTION"})})
+                return _json(self, 200, rec.runtime.http_result())
             if action == "events":
                 return self._sse(rec)
             snap = rec.snapshot()
@@ -264,7 +262,7 @@ class Handler(BaseHTTPRequestHandler):
             rec = REGISTRY.get(str(body.get("task_id") or ""))
             if not rec:
                 return _json(self, 404, _err("TASK_NOT_FOUND", "unknown task", req_id))
-            return _json(self, 200, rec.runtime._result(ok=True))
+            return _json(self, 200, rec.runtime.http_result())
         return _json(self, 404, _err("NOT_FOUND", "not_found", req_id))
 
     def _start(self, body: dict, req_id: str) -> None:
@@ -278,7 +276,15 @@ class Handler(BaseHTTPRequestHandler):
         opts = body.get("options") if isinstance(body.get("options"), dict) else {}
         work = Path(tempfile.mkdtemp(prefix="owl-kernel-"))
         tid = str(uuid4())
-        rt = Runtime(work, target, wait_for_approval=True, allowed_roots=REGISTRY.allowed_roots)
+        rt = Runtime(
+            work,
+            target,
+            wait_for_approval=True,
+            allowed_roots=REGISTRY.allowed_roots,
+            max_retries=int(opts.get("max_retries") or 3),
+            max_iterations=int(opts.get("max_iterations") or 24),
+            timeout_seconds=int(opts.get("timeout_seconds") or 300),
+        )
         rt.task_id = tid
         rec = TaskRecord(rt, str(work), req_id)
         REGISTRY.add(rec)

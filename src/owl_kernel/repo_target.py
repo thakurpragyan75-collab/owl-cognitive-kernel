@@ -25,6 +25,8 @@ BLOCKED_PREFIXES = (
     "/var/log",
 )
 
+SECRET_PARTS = {".ssh", ".gnupg", ".aws", ".kube", ".docker", ".netrc"}
+
 
 def default_allowed_roots() -> list[Path]:
     roots: list[Path] = []
@@ -81,6 +83,18 @@ def _inside(child: Path, root: Path) -> bool:
         return False
 
 
+def _is_secret(resolved: Path) -> bool:
+    parts = set(resolved.parts)
+    if parts & SECRET_PARTS:
+        return True
+    home = Path.home().resolve()
+    if resolved == home:
+        return True
+    if str(resolved) in {"/home", "/Users"}:
+        return True
+    return False
+
+
 def resolve_repository(
     path: str | Path | None,
     *,
@@ -100,12 +114,13 @@ def resolve_repository(
         resolved = raw.resolve(strict=False)
     except OSError as e:
         raise RepoError(f"cannot resolve repository path: {e}") from e
-    # Follow one more time in case of symlink to outside
     resolved = resolved.resolve()
     text = str(resolved)
     for blocked in BLOCKED_PREFIXES:
         if text == blocked or text.startswith(blocked + "/"):
             raise RepoError(f"repository path is in a blocked system location: {blocked}")
+    if _is_secret(resolved):
+        raise RepoError("home-directory-wide or secret location is not allowed")
     if not resolved.exists():
         raise RepoError(f"repository does not exist: {resolved}")
     if not resolved.is_dir():

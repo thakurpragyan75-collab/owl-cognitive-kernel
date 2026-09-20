@@ -58,6 +58,8 @@ Base: `http://127.0.0.1:8770`
 }
 ```
 
+`GET /v1/tasks/{id}/result` includes a `task` object with `changed_files`, `tests: {passed, summary}`, `security`, `candidate`, and `diff`. Origin is never written.
+
 Missing `repository.path` → HTTP 400 `INVALID_REPOSITORY`. The kernel will not substitute a demo repo.
 
 ## Candidate states
