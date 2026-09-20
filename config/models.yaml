@@ -1,0 +1,26 @@
+# Optional providers. Weights are NEVER stored in git.
+# Default runtime uses the stub so OWL stays responsive on 8GB machines.
+#
+# Official models verified 2026-09:
+#   Qwen/Qwen3-Coder-30B-A3B-Instruct   Apache-2.0  ~61GB bf16
+#   mistralai/Devstral-Small-2507       Apache-2.0  ~94GB bf16, Mac 32GB class
+#
+# Do not load both. max_loaded: 1
+
+max_loaded: 1
+default: stub
+
+providers:
+  stub:
+    id: stub
+    always_available: true
+  qwen3-coder:
+    hf: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    openai_base_url: ""   # e.g. http://127.0.0.1:8088/v1
+    min_ram_gb: 24
+  devstral-small-2507:
+    hf: mistralai/Devstral-Small-2507
+    openai_base_url: ""
+    min_ram_gb: 32
+  cloud:
+    openai_base_url: ""

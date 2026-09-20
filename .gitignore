@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.kernel-work/
+*.db
+*.trace.jsonl
+models/*.gguf
+models/*.safetensors
+models/*.bin
+.env
+.env.*
